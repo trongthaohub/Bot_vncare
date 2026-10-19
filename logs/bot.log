@@ -1351,3 +1351,35 @@
 2026-10-19 09:32:00,309 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"
 2026-10-19 09:32:10,537 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"
 2026-10-19 09:32:20,759 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"
+2026-10-19 09:34:09,292 - __main__ - INFO - Bot đang khởi động (Chế độ Webhook: False)...
+2026-10-19 09:34:10,309 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getMe "HTTP/1.1 200 OK"
+2026-10-19 09:34:10,529 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/deleteWebhook "HTTP/1.1 200 OK"
+2026-10-19 09:34:10,531 - apscheduler.scheduler - INFO - Scheduler started
+2026-10-19 09:34:10,532 - telegram.ext.Application - INFO - Application started
+2026-10-19 09:34:11,185 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"
+2026-10-19 09:34:11,568 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/answerCallbackQuery "HTTP/1.1 400 Bad Request"
+2026-10-19 09:34:11,570 - __main__ - ERROR - Lỗi xảy ra khi xử lý update: Query is too old and response timeout expired or query id is invalid
+2026-10-19 09:34:15,939 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"
+2026-10-19 09:34:16,339 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/answerCallbackQuery "HTTP/1.1 200 OK"
+2026-10-19 09:34:16,577 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/editMessageText "HTTP/1.1 400 Bad Request"
+2026-10-19 09:34:16,581 - __main__ - ERROR - Lỗi xảy ra khi xử lý update: There is no text in the message to edit
+2026-10-19 09:34:19,897 - __main__ - INFO - Bot đang khởi động (Chế độ Webhook: False)...
+2026-10-19 09:34:20,883 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getMe "HTTP/1.1 200 OK"
+2026-10-19 09:34:21,110 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/deleteWebhook "HTTP/1.1 200 OK"
+2026-10-19 09:34:21,116 - apscheduler.scheduler - INFO - Scheduler started
+2026-10-19 09:34:21,117 - telegram.ext.Application - INFO - Application started
+2026-10-19 09:37:50,120 - __main__ - INFO - Bot đang khởi động (Chế độ Webhook: False)...
+2026-10-19 09:37:51,127 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getMe "HTTP/1.1 200 OK"
+2026-10-19 09:37:51,343 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/deleteWebhook "HTTP/1.1 200 OK"
+2026-10-19 09:37:51,345 - apscheduler.scheduler - INFO - Scheduler started
+2026-10-19 09:37:51,346 - telegram.ext.Application - INFO - Application started
+2026-10-19 09:37:52,360 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"
+2026-10-19 09:37:52,745 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/answerCallbackQuery "HTTP/1.1 200 OK"
+2026-10-19 09:37:52,965 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/editMessageText "HTTP/1.1 400 Bad Request"
+2026-10-19 09:37:52,966 - __main__ - ERROR - Lỗi xảy ra khi xử lý update: There is no text in the message to edit
+2026-10-19 09:38:01,346 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"
+2026-10-19 09:38:02,269 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/sendMessage "HTTP/1.1 200 OK"
+2026-10-19 09:38:03,658 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"
+2026-10-19 09:38:04,066 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/answerCallbackQuery "HTTP/1.1 200 OK"
+2026-10-19 09:38:04,471 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/editMessageText "HTTP/1.1 200 OK"
+2026-10-19 09:38:13,888 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8825646007:AAEUw7HdGZjG189uAlV7ODF_Q0qdZ2_Njbc/getUpdates "HTTP/1.1 200 OK"

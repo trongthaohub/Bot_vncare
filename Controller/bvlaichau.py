@@ -288,22 +288,35 @@ async def get_patients_by_room(
     total_pages = int(data.get("total", 1))
     raw_rows = list(data.get("rows", []))
 
-    # Nếu yêu cầu fetch_all và có nhiều trang, lặp qua tất cả các trang còn lại
+    # Nếu yêu cầu fetch_all và có nhiều trang, tải đồng thời đa luồng (parallel async) tất cả các trang còn lại
     if fetch_all and total_pages > 1:
-        for p_idx in range(2, total_pages + 1):
-            params["page"] = str(p_idx)
-            params["nd"] = str(int(time.time() * 1000))
-            p_resp = await client.get(
-                rest_url,
-                params=params,
-                headers={**_HEADERS, "Referer": referer_url},
-            )
-            try:
-                p_data = p_resp.json()
-            except Exception:
-                p_data = json.loads(p_resp.text)
-            p_rows = p_data.get("rows", [])
-            raw_rows.extend(p_rows)
+        sem = asyncio.Semaphore(10)
+
+        async def _fetch_single_page(p_idx: int):
+            async with sem:
+                page_params = dict(params)
+                page_params["page"] = str(p_idx)
+                page_params["nd"] = str(int(time.time() * 1000) + p_idx)
+                try:
+                    p_resp = await client.get(
+                        rest_url,
+                        params=page_params,
+                        headers={**_HEADERS, "Referer": referer_url},
+                    )
+                    try:
+                        p_data = p_resp.json()
+                    except Exception:
+                        p_data = json.loads(p_resp.text)
+                    return p_idx, list(p_data.get("rows", []))
+                except Exception as ex:
+                    log.warning(f"Lỗi tải trang {p_idx} procedure {procedure_name}: {ex}")
+                    return p_idx, []
+
+        page_tasks = [_fetch_single_page(p) for p in range(2, total_pages + 1)]
+        page_results = await asyncio.gather(*page_tasks)
+        page_results.sort(key=lambda x: x[0])
+        for _, rows_batch in page_results:
+            raw_rows.extend(rows_batch)
 
     patients = [_clean_patient(p) for p in raw_rows]
 
@@ -509,7 +522,12 @@ async def export_hospital_patients_excel(
     location = login_result.get("location", "")
     base_url = login_result.get("base_url") or url.rstrip("/")
 
-    async with httpx.AsyncClient(cookies=cookies, verify=False, timeout=120.0) as client:
+    async with httpx.AsyncClient(
+        cookies=cookies,
+        verify=False,
+        timeout=120.0,
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+    ) as client:
         uuid = await _extract_uuid(client, base_url, location)
         if not uuid:
             return {"success": False, "message": "Không tìm thấy token uuid"}
@@ -539,12 +557,62 @@ async def export_hospital_patients_excel(
                     candidate_procs.append(sp)
 
         # Đảm bảo có các procedure tiếp nhận ngoại trú cốt lõi khi tài khoản có quyền tiếp nhận
-        for def_p in ["NGT.002", "NGT.001.BVTM.01"]:
+        for def_p in ["NGT.001.BVTM.01", "NGT.002"]:
             if def_p not in candidate_procs:
                 candidate_procs.append(def_p)
 
-        # 2. Truy vấn đồng thời các procedure ứng viên
-        async def _query_proc(p_name: str):
+        # 2. Bước 2a: Thử nhanh trang 1 (rows=10, fetch_all=False) đồng thời để sàng lọc procedure có dữ liệu bệnh nhân
+        async def _probe_proc(p_name: str):
+            try:
+                res = await get_patients_by_room(
+                    client=client,
+                    base_url=base_url,
+                    uuid=uuid,
+                    room_id=room_id,
+                    procedure_name=p_name,
+                    date_option=date_option,
+                    from_date=from_date,
+                    to_date=to_date,
+                    rows=10,
+                    fetch_all=False,
+                )
+                if not res or not res.get("patients"):
+                    return p_name, False, 0, None
+                first_raw = res["patients"][0].get("raw", {})
+                is_valid = has_required_patient_fields(first_raw)
+                return p_name, is_valid, res.get("records", 0), res
+            except Exception as e:
+                log.debug(f"Probe procedure {p_name} error: {e}")
+                return p_name, False, 0, None
+
+        probe_tasks = [_probe_proc(p) for p in candidate_procs]
+        probe_results = await asyncio.gather(*probe_tasks)
+
+        valid_procs = []
+        for p_name, is_valid, rec_count, p_res in probe_results:
+            if is_valid and rec_count > 0:
+                valid_procs.append((p_name, rec_count, p_res))
+
+        # Khử trùng lặp giữa NGT.001.BVTM.01 và NGT.002 nếu cùng số lượng bản ghi (v1 vs v2)
+        procs_to_fetch = []
+        ngt_bvtm = next((p for p in valid_procs if p[0] == "NGT.001.BVTM.01"), None)
+        ngt_002 = next((p for p in valid_procs if p[0] == "NGT.002"), None)
+
+        if ngt_bvtm and ngt_002 and ngt_bvtm[1] == ngt_002[1]:
+            # Hai procedure trùng khớp dữ liệu, ưu tiên lấy v2 NGT.001.BVTM.01
+            procs_to_fetch.append(ngt_bvtm)
+            for p in valid_procs:
+                if p[0] not in ("NGT.001.BVTM.01", "NGT.002"):
+                    procs_to_fetch.append(p)
+        else:
+            procs_to_fetch = valid_procs
+
+        # 3. Bước 2b: Tải toàn bộ các trang đa luồng song song cho các procedure hợp lệ
+        async def _fetch_full_proc(p_tuple):
+            p_name, rec_count, initial_res = p_tuple
+            # Nếu tổng số bản ghi <= 10 thì đã có đầy đủ từ bước probe
+            if rec_count <= 10 and initial_res:
+                return p_name, initial_res
             try:
                 res = await get_patients_by_room(
                     client=client,
@@ -560,26 +628,23 @@ async def export_hospital_patients_excel(
                 )
                 return p_name, res
             except Exception as e:
-                log.warning(f"Lỗi truy vấn procedure {p_name}: {e}")
+                log.warning(f"Lỗi tải đầy đủ procedure {p_name}: {e}")
                 return p_name, None
 
-        tasks = [_query_proc(p) for p in candidate_procs]
-        proc_results = await asyncio.gather(*tasks)
+        full_tasks = [_fetch_full_proc(p) for p in procs_to_fetch]
+        full_results = await asyncio.gather(*full_tasks)
 
-        # 3. Lọc chỉ lấy các procedure trả về bản ghi chứa đầy đủ các trường thông tin bệnh nhân
         matching_procs_data = []
         valid_proc_names = []
 
-        for p_name, res in proc_results:
+        for p_name, res in full_results:
             if not res:
                 continue
             patients_list = res.get("patients", [])
             if patients_list:
-                first_raw = patients_list[0].get("raw", {})
-                if has_required_patient_fields(first_raw):
-                    log.info(f"Procedure {p_name} khớp trường bệnh nhân: {len(patients_list)} bản ghi")
-                    valid_proc_names.append(p_name)
-                    matching_procs_data.append([p["raw"] for p in patients_list])
+                log.info(f"Procedure {p_name} khớp trường bệnh nhân: {len(patients_list)} bản ghi")
+                valid_proc_names.append(p_name)
+                matching_procs_data.append([p["raw"] for p in patients_list])
 
         # 4. Hợp nhất và khử trùng lặp toàn bộ bệnh nhân từ tất cả các procedure hợp lệ
         all_merged_raw = []
