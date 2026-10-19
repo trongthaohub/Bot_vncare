@@ -1,0 +1,2 @@
+[tool.watchfiles]
+ignore_paths = ["logs", "__pycache__", "*.log", "*.db", "*.sqlite"]

@@ -1,0 +1,180 @@
+{
+  "total_hospitals": 35,
+  "hospitals": [
+    {
+      "name": "BENTRE",
+      "domain": "bentre.vncare.vn",
+      "link": "http://bentre.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVBACGIANG",
+      "domain": "bvbacgiang.vncare.vn",
+      "link": "https://bvbacgiang.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVBACHMAI2",
+      "domain": "bvbachmai2.vncare.vn",
+      "link": "http://bvbachmai2.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVBACTHANGLONG",
+      "domain": "bvbacthanglong.vncare.vn",
+      "link": "https://bvbacthanglong.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVBINHDUONG",
+      "domain": "bvbinhduong.vncare.vn",
+      "link": "https://bvbinhduong.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVBINHPHUOC",
+      "domain": "bvbinhphuoc.vncare.vn",
+      "link": "https://bvbinhphuoc.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVBINHTHUAN",
+      "domain": "bvbinhthuan.vncare.vn",
+      "link": "http://bvbinhthuan.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVDAKHOA",
+      "domain": "bvdakhoa.vncare.vn",
+      "link": "http://bvdakhoa.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVDANANG",
+      "domain": "bvdanang.vncare.vn",
+      "link": "http://bvdanang.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVDONGTHAP",
+      "domain": "bvdongthap.vncare.vn",
+      "link": "https://bvdongthap.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVGIALAI",
+      "domain": "bvgialai.vncare.vn",
+      "link": "https://bvgialai.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVHATINH",
+      "domain": "bvhatinh.vncare.vn",
+      "link": "https://bvhatinh.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVHOABINH",
+      "domain": "bvhoabinh.vncare.vn",
+      "link": "http://bvhoabinh.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVHUE",
+      "domain": "bvhue.vncare.vn",
+      "link": "https://bvhue.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVHUNGYEN",
+      "domain": "bvhungyen.vncare.vn",
+      "link": "https://bvhungyen.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVKHANHHOA",
+      "domain": "bvkhanhhoa.vncare.vn",
+      "link": "https://bvkhanhhoa.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVLAICHAU",
+      "domain": "bvlaichau.vncare.vn",
+      "link": "https://bvlaichau.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVLAMDONG",
+      "domain": "bvlamdong.vncare.vn",
+      "link": "http://bvlamdong.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVLANGSON",
+      "domain": "bvlangson.vncare.vn",
+      "link": "https://bvlangson.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVLONGAN",
+      "domain": "bvlongan.vncare.vn",
+      "link": "https://bvlongan.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVNGHEAN",
+      "domain": "bvnghean.vncare.vn",
+      "link": "https://bvnghean.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVNGUYENTRAI",
+      "domain": "bvnguyentrai.vncare.vn",
+      "link": "https://bvnguyentrai.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVNINHBINH",
+      "domain": "bvninhbinh.vncare.vn",
+      "link": "https://bvninhbinh.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVNINHTHUAN",
+      "domain": "bvninhthuan.vncare.vn",
+      "link": "https://bvninhthuan.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVPHUYEN",
+      "domain": "bvphuyen.vncare.vn",
+      "link": "https://bvphuyen.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVQUANGNGAI",
+      "domain": "bvquangngai.vncare.vn",
+      "link": "http://bvquangngai.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVQUANGTRI",
+      "domain": "bvquangtri.vncare.vn",
+      "link": "https://bvquangtri.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVSONLA",
+      "domain": "bvsonla.vncare.vn",
+      "link": "http://bvsonla.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVTAYNINH",
+      "domain": "bvtayninh.vncare.vn",
+      "link": "http://bvtayninh.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVTHAIBINH",
+      "domain": "bvthaibinh.vncare.vn",
+      "link": "http://bvthaibinh.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVVIETDUC2",
+      "domain": "bvvietduc2.vncare.vn",
+      "link": "https://bvvietduc2.vncare.vn/vnpthis"
+    },
+    {
+      "name": "BVVINHPHUC",
+      "domain": "bvvinhphuc.vncare.vn",
+      "link": "http://bvvinhphuc.vncare.vn/vnpthis"
+    },
+    {
+      "name": "HISTEST",
+      "domain": "histest.vncare.vn",
+      "link": "http://histest.vncare.vn/vnpthis"
+    },
+    {
+      "name": "STAGING-BVDAKHOA",
+      "domain": "staging-bvdakhoa.vncare.vn",
+      "link": "https://staging-bvdakhoa.vncare.vn/vnpthis"
+    },
+    {
+      "name": "VNPT-HIS",
+      "domain": "vnpt-his.vncare.vn",
+      "link": "https://vnpt-his.vncare.vn/vnpthis"
+    }
+  ]
+}
