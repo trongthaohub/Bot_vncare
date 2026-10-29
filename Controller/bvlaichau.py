@@ -344,6 +344,80 @@ async def get_patients_by_room(
     }
 
 
+async def get_patient_sample(
+    url: str,
+    username: str,
+    password: str,
+    limit: int = 5,
+    date_options: tuple = ("today", "6"),
+) -> dict:
+    """
+    Đăng nhập và lấy tối đa `limit` bệnh nhân đầu tiên (v1/v2) để kiểm tra DIACHI.
+
+    Dùng cho luồng lọc tài khoản theo tỉnh — không dựng Excel, không tải toàn bộ.
+    Trả về: {success, error_kind, message, url, patients, date_label}
+    """
+    login_result = await login(url, username, password)
+    if not login_result.get("success"):
+        return {
+            "success": False,
+            "error_kind": login_result.get("error_kind", "unexpected"),
+            "message": login_result.get("message", "Đăng nhập thất bại"),
+            "url": url,
+            "patients": [],
+        }
+
+    base_url = login_result.get("base_url") or url.rstrip("/")
+    cookies = login_result.get("cookies", {})
+    location = login_result.get("location", "")
+
+    try:
+        async with httpx.AsyncClient(cookies=cookies, verify=False, timeout=60.0) as client:
+            uuid = await _extract_uuid(client, base_url, location)
+            if not uuid:
+                return {"success": False, "error_kind": "unexpected",
+                        "message": "Không lấy được token uuid", "url": base_url, "patients": []}
+
+            last_error = "Không lấy được dữ liệu bệnh nhân"
+            saw_network = False
+            for date_opt in date_options:
+                for proc in ("NGT.001.BVTM.01", "NGT.002"):
+                    try:
+                        res = await get_patients_by_room(
+                            client=client,
+                            base_url=base_url,
+                            uuid=uuid,
+                            procedure_name=proc,
+                            date_option=date_opt,
+                            rows=max(1, int(limit)),
+                            fetch_all=False,
+                        )
+                    except Exception as e:
+                        log.debug(f"Sample {proc} ({date_opt}) lỗi trên {base_url}: {e}")
+                        last_error = str(e)
+                        saw_network = True
+                        continue
+
+                    patients = res.get("patients") or []
+                    if patients and has_required_patient_fields(patients[0].get("raw", {})):
+                        return {
+                            "success": True,
+                            "error_kind": "ok",
+                            "message": "OK",
+                            "url": base_url,
+                            "date_label": res.get("date_label"),
+                            "patients": patients[:limit],
+                            "login_result": login_result,
+                        }
+            # Lỗi mạng khi lấy dữ liệu phải báo là "network" để nơi gọi thử lại
+            # thay vì kết luận tài khoản không có bệnh nhân của tỉnh.
+            return {"success": False, "error_kind": "network" if saw_network else "unexpected",
+                    "message": last_error, "url": base_url, "patients": []}
+    except Exception as e:
+        return {"success": False, "error_kind": "network",
+                "message": str(e), "url": base_url, "patients": []}
+
+
 async def get_hospital_patients_tree(
     url: str = _DEFAULT_URL,
     username: str = _DEFAULT_USER,

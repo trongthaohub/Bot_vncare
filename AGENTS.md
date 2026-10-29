@@ -21,6 +21,8 @@ Telegram bot (`python-telegram-bot` v20+, async) that logs into VnCare HIS sites
 - `Controller/bvbinhthuan.py` — near-duplicate variant, **not** imported by `bot.py`.
 - Controllers prepend the project root to `sys.path` so they can also run standalone.
 - `hospitals.json` — 35-hospital catalog `{name, domain, link}`; UI matches keys case-insensitively against name/domain. `raw.json` is scratch source data.
+- `tinh_tp.json` — 63 provinces (pre-2025 list) driving the filter UI. `libs/tinh_tp.py` maps province → hospital (`province_hospitals`, heuristic name match + always `vnpt-his.vncare.vn` and `bvdakhoa.vncare.vn`) and matches `DIACHI` (`address_matches_province`).
+- Filter flow (`🔍 Lọc Bệnh Viện`): file/`.txt` paste `user:pass` → pick Tỉnh/Thành (`prov:<code>`) → enter count → `process_filter_file` logs into each candidate system and keeps accounts whose 1–5 sampled patients have `DIACHI` in that province; one `.txt` of `url:user:pass` is sent at the end.
 
 ## Gotchas
 - Telegram `409 Conflict: terminated by other getUpdates request` = two pollers on the same token. Production runs as systemd unit `botvncare` (`enabled`, `Restart=on-failure`), so `kill <pid>` just respawns it — use `systemctl stop botvncare`. Logs: `journalctl -u botvncare` (lifecycle only) and `/root/Bot_vncare/logs/bot.log`. `main()` also binds UDP `127.0.0.1:47615` as a single-instance guard.

