@@ -1,5 +1,4 @@
 import httpx
-from urllib.parse import urljoin
 
 
 # Headers giả lập browser Chrome
@@ -18,6 +17,27 @@ _BROWSER_HEADERS = {
 
 _LOGIN_ENDPOINT = "/servlet/login.ValidateUser"
 
+# Phân loại lỗi trong key "error_kind":
+#   "ok"         -> đăng nhập thành công
+#   "auth"       -> sai tài khoản/mật khẩu    (VĨNH VIỄN - không nên thử lại)
+#   "network"    -> không kết nối/timeout/SSL (TẠM THỜI - nên thử lại)
+#   "unexpected" -> server trả phản hồi lạ     (TẠM THỜI - nên thử lại)
+#
+# Bên gọi PHẢI đọc error_kind, đừng chỉ nhìn success: nếu gộp mọi thứ vào
+# success=False thì tài khoản ĐÚNG sẽ bị loại oan khi mạng chập.
+_AUTH_FAIL_KINDS = ("auth",)
+_RETRYABLE_KINDS = ("network", "unexpected")
+
+
+def is_auth_failure(result: dict) -> bool:
+    """True nếu thất bại chắc chắn do sai tài khoản/mật khẩu (không nên thử lại)."""
+    return (not result.get("success")) and result.get("error_kind") in _AUTH_FAIL_KINDS
+
+
+def is_retryable(result: dict) -> bool:
+    """True nếu thất bại do lỗi tạm thời (mạng/chập chờn) -> nên thử lại."""
+    return (not result.get("success")) and result.get("error_kind") in _RETRYABLE_KINDS
+
 
 async def login(url: str, username: str, password: str) -> dict:
     """
@@ -30,11 +50,12 @@ async def login(url: str, username: str, password: str) -> dict:
 
     Returns:
         dict gồm:
-            - success    (bool): Đăng nhập thành công hay không
-            - message    (str):  Thông báo kết quả
-            - cookies    (dict): Cookies phiên làm việc (nếu thành công)
-            - status_code (int): HTTP status code
-            - location   (str):  Location header từ redirect
+            - success     (bool): Đăng nhập thành công hay không
+            - error_kind  (str):  "ok" | "auth" | "network" | "unexpected"
+            - message     (str):  Thông báo kết quả
+            - cookies     (dict): Cookies phiên làm việc (nếu thành công)
+            - status_code (int):  HTTP status code
+            - location    (str):  Location header từ redirect
     """
     base_url = url.rstrip("/")
     for suffix in [
@@ -48,6 +69,9 @@ async def login(url: str, username: str, password: str) -> dict:
             base_url = base_url[: -len(suffix)].rstrip("/")
             break
 
+    if not base_url.lower().endswith("/vnpthis"):
+        base_url = base_url + "/vnpthis"
+
     try:
         async with httpx.AsyncClient(
             follow_redirects=False,
@@ -55,6 +79,11 @@ async def login(url: str, username: str, password: str) -> dict:
             verify=False,
             http1=True,
             http2=False,
+            # Bỏ qua proxy của môi trường (Windows registry / *_proxy).
+            # Proxy MITM bật mà CA chưa cài vào Python thì MỌI lần login đều
+            # ném SSL exception -> nếu gộp chung vào success=False sẽ báo
+            # "tất cả tài khoản đều sai" trong khi thực ra là lỗi hạ tầng.
+            trust_env=False,
         ) as client:
 
             # --- Bước 1: GET trang chủ để lấy JSESSIONID / SESSIONID và xác định real base URL ---
@@ -95,6 +124,7 @@ async def login(url: str, username: str, password: str) -> dict:
                 if "invalid=1" in location or "login.jsp" in location:
                     return {
                         "success": False,
+                        "error_kind": "auth",
                         "message": "Sai tài khoản hoặc mật khẩu",
                         "status_code": status_code,
                         "location": location,
@@ -105,6 +135,7 @@ async def login(url: str, username: str, password: str) -> dict:
                 if "main/" in location or "manager.jsp" in location:
                     return {
                         "success": True,
+                        "error_kind": "ok",
                         "message": "Đăng nhập thành công",
                         "status_code": status_code,
                         "location": location,
@@ -112,34 +143,36 @@ async def login(url: str, username: str, password: str) -> dict:
                         "base_url": real_base,
                     }
 
+            # Phản hồi lạ (bảo trì, chuyển hướng khác, 5xx...).
+            # Xếp vào loại TẠM THỜI để bên gọi còn thử lại, KHÔNG kết luận
+            # là sai mật khẩu.
             return {
                 "success": False,
+                "error_kind": "unexpected",
                 "message": f"Phản hồi không mong đợi (HTTP {status_code})",
                 "status_code": status_code,
                 "location": location,
                 "cookies": {},
             }
 
-    except httpx.ConnectError:
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+            httpx.WriteTimeout, httpx.PoolTimeout, httpx.ReadError,
+            httpx.WriteError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
         return {
             "success": False,
-            "message": "Không kết nối được tới server",
-            "status_code": 0,
-            "location": "",
-            "cookies": {},
-        }
-    except httpx.TimeoutException:
-        return {
-            "success": False,
-            "message": "Timeout khi kết nối",
+            "error_kind": "network",
+            "message": f"Lỗi kết nối ({type(e).__name__})",
             "status_code": 0,
             "location": "",
             "cookies": {},
         }
     except Exception as e:
+        # SSL/Certificate error và các lỗi hạ tầng khác cũng vào đây.
+        # Đây KHÔNG phải sai mật khẩu -> đánh dấu network để còn thử lại.
         return {
             "success": False,
-            "message": f"Lỗi: {e}",
+            "error_kind": "network",
+            "message": f"Lỗi hạ tầng ({type(e).__name__}): {e}",
             "status_code": 0,
             "location": "",
             "cookies": {},

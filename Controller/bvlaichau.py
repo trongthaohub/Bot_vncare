@@ -16,7 +16,7 @@ if project_root not in sys.path:
 
 from libs.login import login
 from libs.sel_dept import sel_dept
-from libs.export_excel import export_patients_to_excel
+from libs.export_excel import export_patients_to_excel, DEFAULT_FIELDS
 from libs.get_menu import get_reception_menu
 
 log = logging.getLogger(__name__)
@@ -195,6 +195,7 @@ async def get_patients_by_room(
     fetch_all: bool = False,
     api_version: str = "v1",
     procedure_name: str = None,
+    progress_callback=None,
 ) -> dict:
     """
     Lấy danh sách bệnh nhân của một phòng cụ thể (hoặc tất cả các phòng nếu room_id='0').
@@ -291,6 +292,7 @@ async def get_patients_by_room(
     # Nếu yêu cầu fetch_all và có nhiều trang, tải đồng thời đa luồng (parallel async) tất cả các trang còn lại
     if fetch_all and total_pages > 1:
         sem = asyncio.Semaphore(10)
+        completed_pages = [1]
 
         async def _fetch_single_page(p_idx: int):
             async with sem:
@@ -307,7 +309,16 @@ async def get_patients_by_room(
                         p_data = p_resp.json()
                     except Exception:
                         p_data = json.loads(p_resp.text)
-                    return p_idx, list(p_data.get("rows", []))
+                    batch = list(p_data.get("rows", []))
+                    completed_pages[0] += 1
+                    if progress_callback:
+                        try:
+                            await progress_callback(
+                                f"📥 Đang tải dữ liệu: trang {completed_pages[0]}/{total_pages} ({min(completed_pages[0] * rows, records):,}/{records:,} bản ghi)..."
+                            )
+                        except Exception:
+                            pass
+                    return p_idx, batch
                 except Exception as ex:
                     log.warning(f"Lỗi tải trang {p_idx} procedure {procedure_name}: {ex}")
                     return p_idx, []
@@ -366,7 +377,7 @@ async def get_hospital_patients_tree(
 
     cookies = login_result.get("cookies", {})
     location = login_result.get("location", "")
-    base_url = url.rstrip("/")
+    base_url = login_result.get("base_url") or url.rstrip("/")
 
     # 2. Lấy danh sách tất cả các khoa và phòng của tài khoản
     dept_res = await sel_dept(url, login_result=login_result)
@@ -485,6 +496,7 @@ async def export_hospital_patients_excel(
     output_dir: str = ".",
     fetch_all: bool = True,
     target_date: str = None,
+    progress_callback = None,
 ) -> dict:
     """
     Lấy TỔNG HỢP toàn bộ danh sách bệnh nhân (tự động hợp nhất cả v1 và v2, khử trùng lặp)
@@ -544,7 +556,7 @@ async def export_hospital_patients_excel(
                 "count": 0,
                 "file_path": None,
                 "filename": None,
-                "headers": ["TENBENHNHAN", "NGAYSINH", "GIOITINH", "MAHOSOBENHAN", "DIACHI", "SDTBENHNHAN"],
+                "headers": DEFAULT_FIELDS,
                 "total_records": 0,
                 "procedures_matched": [],
             }
@@ -614,6 +626,11 @@ async def export_hospital_patients_excel(
             if rec_count <= 10 and initial_res:
                 return p_name, initial_res
             try:
+                if progress_callback:
+                    try:
+                        await progress_callback(f"📥 Đang tải {rec_count:,} bản ghi từ procedure <code>{p_name}</code>...")
+                    except Exception:
+                        pass
                 res = await get_patients_by_room(
                     client=client,
                     base_url=base_url,
@@ -625,6 +642,7 @@ async def export_hospital_patients_excel(
                     to_date=to_date,
                     rows=5000,
                     fetch_all=fetch_all,
+                    progress_callback=progress_callback,
                 )
                 return p_name, res
             except Exception as e:
@@ -653,7 +671,14 @@ async def export_hospital_patients_excel(
             for next_list in matching_procs_data[1:]:
                 all_merged_raw = _merge_patient_records(all_merged_raw, next_list)
 
-        excel_res = export_patients_to_excel(
+        if progress_callback:
+            try:
+                await progress_callback(f"📊 Đã tải xong {len(all_merged_raw):,} bản ghi! Đang tạo file Excel chuẩn...")
+            except Exception:
+                pass
+
+        excel_res = await asyncio.to_thread(
+            export_patients_to_excel,
             all_merged_raw,
             hospital_name=hospital_name,
             output_dir=output_dir,

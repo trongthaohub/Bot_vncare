@@ -10,4 +10,4 @@ LOGLEVEL = "INFO"
 ADMIN_IDS = [5659580284]
 
 # Danh sách Group/Channel IDs được phép hoạt động (để trống [] nếu không giới hạn)
-ALLOWED_GROUPS = []
+ALLOWED_GROUPS = [-1004422310606]
