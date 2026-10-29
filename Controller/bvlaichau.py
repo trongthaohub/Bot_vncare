@@ -372,7 +372,7 @@ async def get_patient_sample(
     location = login_result.get("location", "")
 
     try:
-        async with httpx.AsyncClient(cookies=cookies, verify=False, timeout=60.0) as client:
+        async with httpx.AsyncClient(cookies=cookies, verify=False, timeout=30.0) as client:
             uuid = await _extract_uuid(client, base_url, location)
             if not uuid:
                 return {"success": False, "error_kind": "unexpected",
