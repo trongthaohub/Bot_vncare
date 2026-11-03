@@ -663,8 +663,14 @@ async def export_hospital_patients_excel(
         if not uuid:
             return {"success": False, "message": "Không tìm thấy token uuid"}
 
-        # 1. Trích xuất tất cả các Stored Procedure từ GridUtil.loadGridBySqlPage trong các trang menu tiếp nhận
-        menu_res = await get_reception_menu(client=client, base_url=base_url, load_grids=True)
+        # 1. Chỉ kiểm tra quyền Tiếp nhận và lấy menu cơ bản. Không bóc tách
+        # toàn bộ JS/GridUtil ở đây: một số HIS có JS rất lớn hoặc request
+        # treo, trong khi procedure chuẩn NGT.002 đã đủ để lấy danh sách.
+        menu_res = await get_reception_menu(client=client, base_url=base_url, load_grids=False)
+        log.info(
+            f"Đã lấy menu Tiếp nhận: access={menu_res.get('has_access')}, "
+            f"items={menu_res.get('total_items', 0)}"
+        )
         if not menu_res.get("has_access") or not menu_res.get("flat_menu"):
             err_msg = f"Tài khoản '{username}' không có quyền truy cập vào phân hệ tiếp nhận của bệnh viện ({url})."
             log.warning(err_msg)
@@ -691,6 +697,8 @@ async def export_hospital_patients_excel(
         for def_p in ["NGT.001.BVTM.01", "NGT.002"]:
             if def_p not in candidate_procs:
                 candidate_procs.append(def_p)
+
+        log.info(f"Bắt đầu probe {len(candidate_procs)} procedure: {', '.join(candidate_procs)}")
 
         # 2. Bước 2a: Thử nhanh trang 1 (rows=10, fetch_all=False) đồng thời để sàng lọc procedure có dữ liệu bệnh nhân
         probe_sem = asyncio.Semaphore(5)
@@ -742,6 +750,11 @@ async def export_hospital_patients_excel(
             if is_valid and rec_count > 0:
                 valid_procs.append((p_name, rec_count, p_res))
 
+        log.info(
+            "Probe hoàn tất: "
+            + (", ".join(f"{name}={count:,}" for name, count, _ in valid_procs) or "không có procedure có dữ liệu")
+        )
+
         # Khử trùng lặp giữa NGT.001.BVTM.01 và NGT.002 nếu cùng số lượng bản ghi (v1 vs v2)
         procs_to_fetch = []
         ngt_bvtm = next((p for p in valid_procs if p[0] == "NGT.001.BVTM.01"), None)
@@ -787,6 +800,10 @@ async def export_hospital_patients_excel(
                 return p_name, None
 
         full_tasks = [_fetch_full_proc(p) for p in procs_to_fetch]
+        log.info(
+            "Bắt đầu tải dữ liệu: "
+            + (", ".join(f"{name}={count:,}" for name, count, _ in procs_to_fetch) or "không có procedure")
+        )
         full_results = await asyncio.gather(*full_tasks)
 
         matching_procs_data = []
