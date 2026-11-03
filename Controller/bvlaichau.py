@@ -65,10 +65,10 @@ DATE_OPTIONS = {
     "today": {"label": "Hôm nay", "start_year": None},
 }
 
-# RestService của VnCare thường chạy ổn với rows nhỏ (curl trên thực tế dùng
-# 20), nhưng có thể trả rỗng/timeout khi yêu cầu 5.000 dòng cho khoảng dữ liệu
-# dài. Dùng 200 dòng/trang để cân bằng tốc độ và độ ổn định.
-EXPORT_PAGE_ROWS = 200
+# Curl của giao diện dùng rows=20, nhưng xuất toàn bộ 300.000 bản ghi với
+# 200 dòng/trang sẽ tạo hơn 1.500 request. 1.000 dòng/trang giảm còn khoảng
+# 300 request mà vẫn tránh payload quá lớn như rows=5.000.
+EXPORT_PAGE_ROWS = 1000
 
 
 def resolve_date_range(
@@ -201,6 +201,7 @@ async def get_patients_by_room(
     api_version: str = "v1",
     procedure_name: str = None,
     progress_callback=None,
+    stop_requested=None,
 ) -> dict:
     """
     Lấy danh sách bệnh nhân của một phòng cụ thể (hoặc tất cả các phòng nếu room_id='0').
@@ -315,12 +316,16 @@ async def get_patients_by_room(
     if fetch_all and total_pages > 1:
         # Giới hạn song song để không làm RestService quá tải khi có hàng
         # chục nghìn bản ghi; mỗi trang vẫn có retry riêng.
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(10)
         completed_pages = [1]
         failed_pages = []
+        stopped = [False]
 
         async def _fetch_single_page(p_idx: int):
             async with sem:
+                if stop_requested and stop_requested():
+                    stopped[0] = True
+                    return p_idx, []
                 page_params = dict(params)
                 page_params["page"] = str(p_idx)
                 page_params["nd"] = str(int(time.time() * 1000) + p_idx)
@@ -340,6 +345,8 @@ async def get_patients_by_room(
                         if not isinstance(p_data, dict) or "rows" not in p_data:
                             raise ValueError("JSON trang không có trường rows")
                         batch = list(p_data.get("rows", []))
+                        if stop_requested and stop_requested():
+                            stopped[0] = True
                         completed_pages[0] += 1
                         if progress_callback:
                             try:
@@ -362,12 +369,12 @@ async def get_patients_by_room(
         page_results.sort(key=lambda x: x[0])
         for _, rows_batch in page_results:
             raw_rows.extend(rows_batch)
-        if failed_pages:
+        if failed_pages and not stopped[0]:
             raise RuntimeError(
                 f"Không tải được {len(failed_pages)}/{total_pages - 1} trang dữ liệu "
                 f"(trang: {', '.join(map(str, sorted(failed_pages)[:10]))})"
             )
-        if records > 0 and len(raw_rows) < records:
+        if records > 0 and len(raw_rows) < records and not stopped[0]:
             raise RuntimeError(
                 f"API chỉ trả {len(raw_rows):,}/{records:,} bản ghi sau khi tải đủ các trang"
             )
@@ -383,6 +390,7 @@ async def get_patients_by_room(
         "page": int(data.get("page", 1)),
         "records": records,
         "fetched_count": len(patients),
+        "partial": bool(fetch_all and total_pages > 1 and 'stopped' in locals() and stopped[0]),
         "patients": patients,
     }
 
@@ -614,6 +622,7 @@ async def export_hospital_patients_excel(
     fetch_all: bool = True,
     target_date: str = None,
     progress_callback = None,
+    stop_requested=None,
 ) -> dict:
     """
     Lấy TỔNG HỢP toàn bộ danh sách bệnh nhân (tự động hợp nhất cả v1 và v2, khử trùng lặp)
@@ -793,6 +802,7 @@ async def export_hospital_patients_excel(
                     rows=EXPORT_PAGE_ROWS,
                     fetch_all=fetch_all,
                     progress_callback=progress_callback,
+                    stop_requested=stop_requested,
                 )
                 return p_name, res
             except Exception as e:
@@ -849,6 +859,7 @@ async def export_hospital_patients_excel(
         )
         excel_res["total_records"] = len(all_merged_raw)
         excel_res["procedures_matched"] = valid_proc_names
+        excel_res["partial"] = any(r.get("partial") for _, r in full_results if r)
         return excel_res
 
 

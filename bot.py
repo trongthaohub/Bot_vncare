@@ -1267,8 +1267,14 @@ async def export_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🏥 Bệnh viện: <b>{disp_name}</b>\n"
             f"📅 Khoảng thời gian: <b>{label}</b>\n"
             f"<i>Hệ thống đang tải dữ liệu song song qua Stored Procedure, vui lòng chờ...</i>",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏹ Dừng và xuất phần đã tải", callback_data="export_stop")],
+            ]),
         )
+
+        context.user_data["export_running"] = True
+        context.user_data["export_stop"] = False
 
         last_edit = [0.0]
         async def on_progress(progress_text: str):
@@ -1281,7 +1287,10 @@ async def export_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                         f"🏥 Bệnh viện: <b>{disp_name}</b>\n"
                         f"📅 Khoảng thời gian: <b>{label}</b>\n\n"
                         f"{progress_text}",
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("⏹ Dừng và xuất phần đã tải", callback_data="export_stop")],
+                        ]),
                     )
                 except Exception:
                     pass
@@ -1295,8 +1304,10 @@ async def export_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 date_option=date_opt,
                 fetch_all=True,
                 progress_callback=on_progress,
+                stop_requested=lambda: bool(context.user_data.get("export_stop")),
             )
         except Exception as e:
+            context.user_data["export_running"] = False
             log.exception(f"Lỗi khi xuất file Excel cho {disp_name}: {e}")
             await status_msg.edit_text(
                 f"❌ <b>Lỗi trong quá trình xuất file:</b> <code>{e}</code>",
@@ -1311,6 +1322,8 @@ async def export_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             count = exp_res.get("count", 0)
             filename = exp_res.get("filename", f"[{hosp_name}][{count}].xlsx")
             is_zip = exp_res.get("is_zip", False)
+            partial = bool(exp_res.get("partial")) or bool(context.user_data.get("export_stop"))
+            context.user_data["export_running"] = False
 
             # Không gửi file Excel rỗng dưới trạng thái thành công. Controller
             # đã kiểm tra trường hợp này, nhưng giữ thêm chốt ở Telegram để
@@ -1342,8 +1355,8 @@ async def export_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 size_desc += f" <i>(đã nén từ {orig_mb:.1f} MB để tải nhanh)</i>"
 
             caption = (
-                f"✅ <b>Xuất file thành công!</b>\n"
-                f"🏥 Bệnh viện: <b>{disp_name}</b>\n"
+                ("⚠️ <b>Đã dừng và xuất phần dữ liệu đã tải!</b>\n" if partial else "✅ <b>Xuất file thành công!</b>\n")
+                + f"🏥 Bệnh viện: <b>{disp_name}</b>\n"
                 f"📅 Thời gian: <b>{label}</b>\n"
                 f"👥 Tổng số bệnh nhân: <b>{count:,}</b>\n"
                 f"📁 Tên file: <code>{filename}</code>\n"
@@ -1549,6 +1562,16 @@ async def export_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+async def export_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Yêu cầu dừng tải trang và xuất phần bệnh nhân đã nhận được."""
+    query = update.callback_query
+    if not context.user_data.get("export_running"):
+        await query.answer("Không có lượt xuất dữ liệu đang chạy.", show_alert=False)
+        return
+    context.user_data["export_stop"] = True
+    await query.answer("⏹ Đang dừng và tạo file từ phần đã tải...", show_alert=False)
+
+
 async def show_date_options_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Hiển thị lại menu chọn ngày cho phiên làm việc hiện tại."""
     query = update.callback_query
@@ -1639,6 +1662,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(filter_cancel_callback, pattern="^filter_cancel$"))
     application.add_handler(CallbackQueryHandler(filter_stop_callback, pattern="^filter_stop$"))
     application.add_handler(CallbackQueryHandler(export_date_callback, pattern=r"^date_opt:"))
+    application.add_handler(CallbackQueryHandler(export_stop_callback, pattern="^export_stop$"))
     application.add_handler(CallbackQueryHandler(show_date_options_callback, pattern="^show_date_options$"))
     application.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_document_accounts))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_credentials))
