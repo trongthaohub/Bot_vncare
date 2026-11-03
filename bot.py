@@ -1312,6 +1312,27 @@ async def export_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             filename = exp_res.get("filename", f"[{hosp_name}][{count}].xlsx")
             is_zip = exp_res.get("is_zip", False)
 
+            # Không gửi file Excel rỗng dưới trạng thái thành công. Controller
+            # đã kiểm tra trường hợp này, nhưng giữ thêm chốt ở Telegram để
+            # tránh báo sai nếu một controller/API trả success với count=0.
+            if count <= 0:
+                for empty_path in {file_path, raw_file_path}:
+                    try:
+                        if empty_path and os.path.exists(empty_path):
+                            os.remove(empty_path)
+                    except OSError:
+                        pass
+                await status_msg.edit_text(
+                    "⚠️ <b>Chưa lấy được dữ liệu bệnh nhân.</b>\n"
+                    f"🏥 Bệnh viện: <b>{disp_name}</b>\n"
+                    f"📅 Khoảng thời gian: <b>{label}</b>\n\n"
+                    "API có thể đang xử lý chậm do dữ liệu lớn hoặc phiên chưa trả đủ dữ liệu. "
+                    "Vui lòng thử lại sau ít phút.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+                return
+
             f_size_bytes = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else 0
             f_size_mb = f_size_bytes / (1024 * 1024)
 

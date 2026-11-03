@@ -1,35 +1,26 @@
 # AGENTS.md
 
-## What this is
-Telegram bot (`python-telegram-bot` v20+, async) that logs into VnCare HIS sites for many hospitals, lists departments/rooms, and exports patient lists to Excel. Code, comments and user-facing strings are Vietnamese — keep them that way.
+## Project
+- Async `python-telegram-bot` application for logging into VnCare HIS hospital systems and exporting patient lists to Excel. Keep code, comments, and user-facing text in Vietnamese.
+- `bot.py` is the Telegram entrypoint and contains handlers, account parsing, filtering, export orchestration, and `main()`.
+- `libs/login.py` owns VnCare authentication; `Controller/bvlaichau.py` is the controller imported by `bot.py`. `Controller/bvbinhthuan.py` is standalone and not wired in.
+- `database/` creates/uses SQLite `database/bot.db` at import time. `libs/sel_dept.py` caches departments/rooms there.
+- `hospitals.json` is the hospital catalog. `tinh_tp.json` and `libs/tinh_tp.py` drive the 63-province filter, including merged-province matching.
 
-## Run / config
-- Install: `pip install -r requirements.txt` (inside `venv/`, which is gitignored).
-- Run: `python bot.py`.
-- Config comes from **`config.py`**, not `.env`. `README.md` and `.env.example` are stale — ignore them.
-- `config.py` is tracked in git with the real `BOT_TOKEN` despite being listed in `.gitignore`. Never print/echo it, and never commit token changes.
-- Logs: `logs/bot.log` (WatchedFileHandler) + colored console output.
-- No test suite, linter or formatter config. `test/export_noi.py` is a manual script that hits the real VnCare backend with hardcoded credentials. Safe check for edits: `python -c "import ast,io;ast.parse(open('bot.py',encoding='utf-8').read())"`.
+## Commands and configuration
+- Install in the ignored virtual environment: `pip install -r requirements.txt`; run with `python bot.py`.
+- Runtime configuration is `config.py`; the README and `.env.example` describe an older setup. Never print, replace, or commit the real `BOT_TOKEN` in `config.py`.
+- There is no automated test/lint/formatter configuration. Minimum verification after Python edits: `python -m py_compile bot.py Controller/bvlaichau.py libs/tinh_tp.py`.
+- `test/export_noi.py` is a manual live-backend script with hardcoded credentials; do not run it as a normal test.
 
-## Layout
-- `bot.py` — entire Telegram layer: handlers, account-line parsing, export orchestration, `main()`. Single file, ~1200 lines.
-- `database/` — SQLite `database/bot.db`, schema auto-created; module-level singleton `db = Database()` at import time.
-- `libs/login.py` — `login(url, username, password)` against `{base}/vnpthis/servlet/login.ValidateUser`. Callers **must** read `result["error_kind"]` (`"ok" | "auth" | "network" | "unexpected"`) and use `is_retryable()`; treating every failure as bad credentials wrongly rejects valid accounts on flaky networks.
-- `libs/sel_dept.py` — departments/rooms, cached in DB, `force_refresh` to bypass cache.
-- `libs/get_menu.py`, `libs/export_excel.py` (openpyxl helpers, `DEFAULT_FIELDS`).
-- `Controller/bvlaichau.py` — hospital-specific export flow (uuid, procedure call, patient rows); the only controller wired into `bot.py`.
-- `Controller/bvbinhthuan.py` — near-duplicate variant, **not** imported by `bot.py`.
-- Controllers prepend the project root to `sys.path` so they can also run standalone.
-- `hospitals.json` — 35-hospital catalog `{name, domain, link}`; UI matches keys case-insensitively against name/domain. `raw.json` is scratch source data.
-- `tinh_tp.json` — 63 provinces (pre-2025 list) driving the filter UI. `libs/tinh_tp.py` maps province → hospital (`province_hospitals`, heuristic name match + always `vnpt-his.vncare.vn` and `bvdakhoa.vncare.vn`) and matches `DIACHI` (`address_matches_province`).
-- Filter flow (`🔍 Lọc Bệnh Viện`): file/`.txt` paste `user:pass` → pick Tỉnh/Thành (`prov:<code>`) → enter count → `process_filter_file` logs into each candidate system and keeps accounts whose 1–5 sampled patients have `DIACHI` in that province; one `.txt` of `url:user:pass` is sent at the end. A plain `user:pass` file sent without starting the filter session is auto-routed into this flow. Scanning thousands of accounts takes tens of minutes, so the progress message shows an ETA and a `filter_stop` button; `FILTER_ACCOUNT_TIMEOUT` caps one account at 60s.
+## Behavior that is easy to break
+- `login()` returns `error_kind` (`ok`, `auth`, `network`, or `unexpected`); use `is_retryable()` and do not treat network failures as bad credentials.
+- Normal export input must include a VnCare URL per account (`url:user:pass`, `url user pass`, full `/vnpthis` URL, or `url|user|pass`). `normalize_vncare_url()` is the security gate and only permits `*.vncare.vn` hosts.
+- The filter flow accepts `user:pass`, asks for province and count, samples up to five patients across candidate systems, and returns `url:user:pass`. Large scans show progress/ETA and can be stopped; keep `Application.builder().concurrent_updates(True)` so stop callbacks are processed.
+- `httpx` calls intentionally use `trust_env=False` in the relevant clients; removing it can make local proxy/TLS settings break VnCare requests.
+- Telegram messages must stay under 4096 characters; use `safe_edit_or_reply()` for long output. File export uploads use long timeouts and may be slow.
 
-## Gotchas
-- `Application.builder().concurrent_updates(True)` — without it PTB handles updates one at a time, so a long filter scan blocks `/ping` and never receives the `filter_stop` callback. Don't remove it.
-- Telegram `409 Conflict: terminated by other getUpdates request` = two pollers on the same token. Production runs as systemd unit `botvncare` (`enabled`, `Restart=on-failure`), so `kill <pid>` just respawns it — use `systemctl stop botvncare`. Logs: `journalctl -u botvncare` (lifecycle only) and `/root/Bot_vncare/logs/bot.log`. `main()` also binds UDP `127.0.0.1:47615` as a single-instance guard.
-- Telegram caps messages at 4096 chars. Route long output through `safe_edit_or_reply()` (chunks at 3800); direct `edit_message_text`/`reply_text` with unbounded text causes `400 Text is too long`.
-- `httpx` clients to VnCare deliberately use `trust_env=False` in places to bypass local MITM proxies (Reqable/9router) that break TLS. Don't remove.
-- Account input requires the hospital URL on every line (`bvabc.vncare.vn:user:pass`, `bvabc.vncare.vn user pass`, full `https://…/vnpthis:user:pass`, or `url|user|pass`); plain `user:pass` is only accepted in the account-filter flow where the hospital is already chosen. A one-line paste separated by commas/semicolons is split before each vncare URL. Lines are stripped of surrounding `,;` because stray commas silently corrupt usernames. `normalize_vncare_url()` is the single gate — only `*.vncare.vn` hosts are allowed, everything else is dropped.
-- `data/loc.txt` is TSV with header `Email/Username\tPassword` and `[fail` sentinel passwords. `convert_loc.py` emits `data/loc_formatted.txt` as `user:pass`, dropping fails.
-- Git state is noisy: `__pycache__/`, `logs/bot.log` and `database/bot.db` are tracked (deletions/modifications show up). Never `git add -A`; stage only the files you touched.
-- `.watchfiles.toml` excludes logs/pycache/db if you use watchfiles for auto-reload.
+## Operations and repository hygiene
+- Production is the `botvncare` systemd service on `/root/Bot_vncare`; use `systemctl stop/restart botvncare`, not `kill`, because restart-on-failure respawns it. Inspect app output in `/root/Bot_vncare/logs/bot.log`; `journalctl -u botvncare` mainly shows service lifecycle.
+- Telegram `409 Conflict` means another poller is using the same token. `main()` also binds UDP `127.0.0.1:47615` as a single-instance guard.
+- `logs/bot.log`, `database/bot.db`, and generated `__pycache__/` files may appear as noisy changes. Never use `git add -A`; stage only files intentionally changed.

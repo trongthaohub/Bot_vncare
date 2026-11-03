@@ -274,16 +274,33 @@ async def get_patients_by_room(
     rest_url = base_url.rstrip("/") + "/RestService"
     referer_url = f"{base_url.rstrip('/')}/main/manager.jsp?func={referer_func}"
 
-    resp = await client.get(
-        rest_url,
-        params=params,
-        headers={**_HEADERS, "Referer": referer_url},
-    )
-
-    try:
-        data = resp.json()
-    except Exception:
-        data = json.loads(resp.text)
+    # Các khoảng thời gian lớn thường khiến RestService phản hồi chậm hoặc
+    # trả HTML/JSON rỗng ở lần gọi đầu. Không được coi lần gọi lỗi là danh
+    # sách 0 bệnh nhân vì phía bot sẽ gửi nhầm file Excel rỗng.
+    data = None
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            resp = await client.get(
+                rest_url,
+                params=params,
+                headers={**_HEADERS, "Referer": referer_url},
+            )
+            resp.raise_for_status()
+            try:
+                candidate = resp.json()
+            except Exception:
+                candidate = json.loads(resp.text)
+            if not isinstance(candidate, dict) or "rows" not in candidate:
+                raise ValueError("RestService trả về JSON không có trường rows")
+            data = candidate
+            break
+        except Exception as ex:
+            last_error = ex
+            if attempt < 3:
+                await asyncio.sleep(attempt * 2)
+    if data is None:
+        raise RuntimeError(f"Không lấy được dữ liệu trang {page}: {last_error}")
 
     records = int(data.get("records", 0))
     total_pages = int(data.get("total", 1))
@@ -291,43 +308,64 @@ async def get_patients_by_room(
 
     # Nếu yêu cầu fetch_all và có nhiều trang, tải đồng thời đa luồng (parallel async) tất cả các trang còn lại
     if fetch_all and total_pages > 1:
-        sem = asyncio.Semaphore(10)
+        # Giới hạn song song để không làm RestService quá tải khi có hàng
+        # chục nghìn bản ghi; mỗi trang vẫn có retry riêng.
+        sem = asyncio.Semaphore(5)
         completed_pages = [1]
+        failed_pages = []
 
         async def _fetch_single_page(p_idx: int):
             async with sem:
                 page_params = dict(params)
                 page_params["page"] = str(p_idx)
                 page_params["nd"] = str(int(time.time() * 1000) + p_idx)
-                try:
-                    p_resp = await client.get(
-                        rest_url,
-                        params=page_params,
-                        headers={**_HEADERS, "Referer": referer_url},
-                    )
+                last_page_error = None
+                for attempt in range(1, 4):
                     try:
-                        p_data = p_resp.json()
-                    except Exception:
-                        p_data = json.loads(p_resp.text)
-                    batch = list(p_data.get("rows", []))
-                    completed_pages[0] += 1
-                    if progress_callback:
+                        p_resp = await client.get(
+                            rest_url,
+                            params=page_params,
+                            headers={**_HEADERS, "Referer": referer_url},
+                        )
+                        p_resp.raise_for_status()
                         try:
-                            await progress_callback(
-                                f"📥 Đang tải dữ liệu: trang {completed_pages[0]}/{total_pages} ({min(completed_pages[0] * rows, records):,}/{records:,} bản ghi)..."
-                            )
+                            p_data = p_resp.json()
                         except Exception:
-                            pass
-                    return p_idx, batch
-                except Exception as ex:
-                    log.warning(f"Lỗi tải trang {p_idx} procedure {procedure_name}: {ex}")
-                    return p_idx, []
+                            p_data = json.loads(p_resp.text)
+                        if not isinstance(p_data, dict) or "rows" not in p_data:
+                            raise ValueError("JSON trang không có trường rows")
+                        batch = list(p_data.get("rows", []))
+                        completed_pages[0] += 1
+                        if progress_callback:
+                            try:
+                                await progress_callback(
+                                    f"📥 Đang tải dữ liệu: trang {completed_pages[0]}/{total_pages} ({min(completed_pages[0] * rows, records):,}/{records:,} bản ghi)..."
+                                )
+                            except Exception:
+                                pass
+                        return p_idx, batch
+                    except Exception as ex:
+                        last_page_error = ex
+                        if attempt < 3:
+                            await asyncio.sleep(attempt * 2)
+                failed_pages.append(p_idx)
+                log.warning(f"Lỗi tải trang {p_idx} procedure {procedure_name} sau 3 lần thử: {last_page_error}")
+                return p_idx, []
 
         page_tasks = [_fetch_single_page(p) for p in range(2, total_pages + 1)]
         page_results = await asyncio.gather(*page_tasks)
         page_results.sort(key=lambda x: x[0])
         for _, rows_batch in page_results:
             raw_rows.extend(rows_batch)
+        if failed_pages:
+            raise RuntimeError(
+                f"Không tải được {len(failed_pages)}/{total_pages - 1} trang dữ liệu "
+                f"(trang: {', '.join(map(str, sorted(failed_pages)[:10]))})"
+            )
+        if records > 0 and len(raw_rows) < records:
+            raise RuntimeError(
+                f"API chỉ trả {len(raw_rows):,}/{records:,} bản ghi sau khi tải đủ các trang"
+            )
 
     patients = [_clean_patient(p) for p in raw_rows]
 
@@ -611,7 +649,9 @@ async def export_hospital_patients_excel(
     async with httpx.AsyncClient(
         cookies=cookies,
         verify=False,
-        timeout=120.0,
+        # Khoảng dữ liệu từ 2025 có thể rất lớn; 120s làm request bị coi là
+        # lỗi quá sớm rồi trước đây bị biến thành file 0 dòng.
+        timeout=httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=60.0),
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     ) as client:
         uuid = await _extract_uuid(client, base_url, location)
@@ -648,27 +688,35 @@ async def export_hospital_patients_excel(
                 candidate_procs.append(def_p)
 
         # 2. Bước 2a: Thử nhanh trang 1 (rows=10, fetch_all=False) đồng thời để sàng lọc procedure có dữ liệu bệnh nhân
+        probe_sem = asyncio.Semaphore(5)
+
         async def _probe_proc(p_name: str):
-            try:
-                res = await get_patients_by_room(
-                    client=client,
-                    base_url=base_url,
-                    uuid=uuid,
-                    room_id=room_id,
-                    procedure_name=p_name,
-                    date_option=date_option,
-                    from_date=from_date,
-                    to_date=to_date,
-                    rows=10,
-                    fetch_all=False,
-                )
-                if not res or not res.get("patients"):
-                    return p_name, False, 0, None
-                first_raw = res["patients"][0].get("raw", {})
-                is_valid = has_required_patient_fields(first_raw)
-                return p_name, is_valid, res.get("records", 0), res
-            except Exception as e:
-                log.debug(f"Probe procedure {p_name} error: {e}")
+            async with probe_sem:
+                last_error = None
+                for attempt in range(1, 4):
+                    try:
+                        res = await get_patients_by_room(
+                            client=client,
+                            base_url=base_url,
+                            uuid=uuid,
+                            room_id=room_id,
+                            procedure_name=p_name,
+                            date_option=date_option,
+                            from_date=from_date,
+                            to_date=to_date,
+                            rows=10,
+                            fetch_all=False,
+                        )
+                        if not res or not res.get("patients"):
+                            return p_name, False, 0, None
+                        first_raw = res["patients"][0].get("raw", {})
+                        is_valid = has_required_patient_fields(first_raw)
+                        return p_name, is_valid, res.get("records", 0), res
+                    except Exception as e:
+                        last_error = e
+                        if attempt < 3:
+                            await asyncio.sleep(attempt * 2)
+                log.warning(f"Probe procedure {p_name} lỗi sau 3 lần thử: {last_error}")
                 return p_name, False, 0, None
 
         probe_tasks = [_probe_proc(p) for p in candidate_procs]
@@ -744,6 +792,16 @@ async def export_hospital_patients_excel(
             all_merged_raw = matching_procs_data[0]
             for next_list in matching_procs_data[1:]:
                 all_merged_raw = _merge_patient_records(all_merged_raw, next_list)
+
+        # Không tạo file thành công với 0 dòng. Trường hợp này thường là
+        # RestService timeout/đứt một trang (đặc biệt với mốc từ năm 2025),
+        # và phải quay về bot dưới dạng lỗi để người dùng thử lại thay vì
+        # nhận một file Excel rỗng gây hiểu nhầm.
+        if not all_merged_raw:
+            raise RuntimeError(
+                "Không nhận được bản ghi bệnh nhân. API có thể đang phản hồi chậm "
+                "hoặc phiên đăng nhập không có quyền/dữ liệu trong khoảng đã chọn."
+            )
 
         if progress_callback:
             try:
