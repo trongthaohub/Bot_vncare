@@ -65,6 +65,11 @@ DATE_OPTIONS = {
     "today": {"label": "Hôm nay", "start_year": None},
 }
 
+# RestService của VnCare thường chạy ổn với rows nhỏ (curl trên thực tế dùng
+# 20), nhưng có thể trả rỗng/timeout khi yêu cầu 5.000 dòng cho khoảng dữ liệu
+# dài. Dùng 200 dòng/trang để cân bằng tốc độ và độ ổn định.
+EXPORT_PAGE_ROWS = 200
+
 
 def resolve_date_range(
     option: str | int = None,
@@ -691,6 +696,14 @@ async def export_hospital_patients_excel(
         probe_sem = asyncio.Semaphore(5)
 
         async def _probe_proc(p_name: str):
+            # Menu của một số bệnh viện chứa procedure thống kê/tổng hợp.
+            # Chúng trả schema khác (không có `rows`) nên không thể dùng để
+            # lấy danh sách bệnh nhân và không cần retry như API bệnh nhân.
+            proc_upper = str(p_name or "").upper()
+            if any(marker in proc_upper for marker in ("THONGKE", "THỐNGKÊ", "GETTHONGKE")):
+                log.debug(f"Bỏ qua procedure thống kê khi lấy bệnh nhân: {p_name}")
+                return p_name, False, 0, None
+
             async with probe_sem:
                 last_error = None
                 for attempt in range(1, 4):
@@ -716,7 +729,9 @@ async def export_hospital_patients_excel(
                         last_error = e
                         if attempt < 3:
                             await asyncio.sleep(attempt * 2)
-                log.warning(f"Probe procedure {p_name} lỗi sau 3 lần thử: {last_error}")
+                # Một số procedure trong menu không phải API danh sách bệnh
+                # nhân; chỉ ghi debug để không gây hiểu nhầm trong log vận hành.
+                log.debug(f"Probe procedure {p_name} lỗi sau 3 lần thử: {last_error}")
                 return p_name, False, 0, None
 
         probe_tasks = [_probe_proc(p) for p in candidate_procs]
@@ -762,7 +777,7 @@ async def export_hospital_patients_excel(
                     date_option=date_option,
                     from_date=from_date,
                     to_date=to_date,
-                    rows=5000,
+                    rows=EXPORT_PAGE_ROWS,
                     fetch_all=fetch_all,
                     progress_callback=progress_callback,
                 )
